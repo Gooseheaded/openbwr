@@ -1,0 +1,18 @@
+# Local task tracker state
+.beads/
+
+# Local builds
+build-*/
+
+# Local scan outputs and logs
+classification-output/
+log.txt
+
+# Local extracted assets / copyrighted data
+tileset_data/
+
+# Local fixture assets (kept out of repo)
+tests/testdata/
+
+# Python caches
+tools/__pycache__/
