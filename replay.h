@@ -8,6 +8,10 @@
 
 namespace bwgame {
 
+static inline bool is_valid_replay_identifier(uint32_t identifier) {
+	return identifier == 0x53526572 || identifier == 0x53526573;
+}
+
 namespace data_loading {
 
 struct crc32_t {
@@ -105,7 +109,7 @@ struct replay_functions: action_functions {
 	void load_replay(reader_T&& r, bool initial_processing = true, std::vector<uint8_t>* get_map_data = nullptr) {
 		
 		uint32_t identifier = r.template get<uint32_t>();
-		if (identifier != 0x53526572) error("load_replay: invalid identifier %#x", identifier);
+		if (!is_valid_replay_identifier(identifier)) error("load_replay: invalid identifier %#x", identifier);
 
 		std::array<uint8_t, 633> game_info_buffer;
 		r.get_bytes(game_info_buffer.data(), game_info_buffer.size());

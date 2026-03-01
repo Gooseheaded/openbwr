@@ -5,6 +5,7 @@
 #include "data_types.h"
 #include "game_types.h"
 #include "data_loading.h"
+#include "scr_tile_compat.h"
 #include "bwenums.h"
 #include "korean.h"
 
@@ -13,6 +14,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <functional>
+#include <cstdio>
 
 namespace bwgame {
 
@@ -127,6 +129,9 @@ struct global_state {
 
 	std::array<a_vector<uint8_t>, 8> tileset_vf4;
 	std::array<a_vector<uint8_t>, 8> tileset_cv5;
+	std::array<a_vector<uint8_t>, 8> scr_tileset_vf4;
+	std::array<a_vector<uint8_t>, 8> scr_tileset_cv5;
+	bool has_scr_semantic_pack = false;
 };
 
 struct game_state {
@@ -166,6 +171,7 @@ struct game_state {
 	a_vector<cv5_entry> cv5;
 	a_vector<vf4_entry> vf4;
 	a_vector<uint16_t> mega_tile_flags;
+	bool use_scr_semantic_pack = false;
 
 	unit_types_t unit_types;
 	weapon_types_t weapon_types;
@@ -21102,7 +21108,25 @@ struct game_load_functions : state_functions {
 
 		};
 
-		auto& vf4_data = global_st.tileset_vf4.at(game_st.tileset_index);
+		auto& vf4_set = game_st.use_scr_semantic_pack ? global_st.scr_tileset_vf4 : global_st.tileset_vf4;
+		auto& cv5_set = game_st.use_scr_semantic_pack ? global_st.scr_tileset_cv5 : global_st.tileset_cv5;
+		auto& vf4_data = vf4_set.at(game_st.tileset_index);
+		auto& cv5_data = cv5_set.at(game_st.tileset_index);
+		auto requirement = scr_tileset_requirements.at(game_st.tileset_index);
+		if (!game_st.use_scr_semantic_pack) {
+			requirement.min_cv5_entries = 1;
+			requirement.min_vf4_entries = 1;
+		}
+		a_string tileset_validation_error = validate_tileset_semantic_data(requirement, cv5_data, vf4_data);
+		if (!tileset_validation_error.empty()) {
+			error("tileset semantics validation failed: %s", tileset_validation_error);
+		}
+		std::fprintf(stderr, "openbw: tileset loader pack=%s tileset=%zu cv5_entries=%zu vf4_entries=%zu\n",
+			game_st.use_scr_semantic_pack ? "scr" : "classic",
+			game_st.tileset_index,
+			cv5_data.size() / 52,
+			vf4_data.size() / 32);
+
 		data_loading::data_reader_le r(vf4_data.data(), vf4_data.data() + vf4_data.size());
 		game_st.vf4.reserve(vf4_data.size() / 32);
 		while (r.left()) {
@@ -21112,7 +21136,6 @@ struct game_load_functions : state_functions {
 				e.flags[i] = r.get<uint16_t>();
 			}
 		}
-		auto& cv5_data = global_st.tileset_cv5.at(game_st.tileset_index);
 		r = data_loading::data_reader_le(cv5_data.data(), cv5_data.data() + cv5_data.size());
 		game_st.cv5.reserve(cv5_data.size() / 52);
 		while (r.left()) {
@@ -21232,6 +21255,51 @@ struct game_load_functions : state_functions {
 			return a_string(tag.data.data(), 4);
 		};
 
+		static const std::array<size_t, 8> classic_max_group_by_tileset = {{
+			1664, 1512, 1264, 1261, 1577, 1519, 1414, 1493
+		}};
+
+		bool heuristic_has_era = false;
+		bool heuristic_has_mtxm = false;
+		size_t heuristic_tileset_index = 0;
+		size_t heuristic_max_group_index = 0;
+		size_t heuristic_classic_max_group_index = 0;
+		bool heuristic_uses_new_tiles = false;
+
+		auto scan_tile_heuristics = [&]() {
+			data_reader_le r(data, data + data_size);
+			heuristic_has_era = false;
+			heuristic_has_mtxm = false;
+			heuristic_tileset_index = 0;
+			heuristic_max_group_index = 0;
+			heuristic_classic_max_group_index = 0;
+			heuristic_uses_new_tiles = false;
+			while (r.left() >= 8) {
+				tag_t tag = r.get<std::array<char, 4>>();
+				uint32_t len = r.get<uint32_t>();
+				if (len > r.left()) break;
+				auto chunk = data_reader_le(r.ptr, r.ptr + len);
+				if (tag == tag_t("ERA ")) {
+					if (chunk.left() >= 2) {
+						heuristic_tileset_index = chunk.get<uint16_t>() % 8;
+						heuristic_has_era = true;
+						heuristic_classic_max_group_index = classic_max_group_by_tileset[heuristic_tileset_index];
+					}
+				} else if (tag == tag_t("MTXM")) {
+					heuristic_has_mtxm = true;
+					while (chunk.left() >= 2) {
+						uint16_t raw = chunk.get<uint16_t>();
+						size_t group_index = (raw >> 4) & 0x7ff;
+						if (group_index > heuristic_max_group_index) heuristic_max_group_index = group_index;
+					}
+				}
+				r.skip(len);
+			}
+			if (heuristic_has_era && heuristic_has_mtxm) {
+				heuristic_uses_new_tiles = heuristic_max_group_index > heuristic_classic_max_group_index;
+			}
+		};
+
 		using tag_list_t = a_vector<std::pair<tag_t, bool>>;
 		auto read_chunks = [&](const tag_list_t&tags) {
 			data_reader_le r(data, data + data_size);
@@ -21341,11 +21409,20 @@ struct game_load_functions : state_functions {
 				if (i >= game_st.gfx_tiles.size()) break;
 				game_st.gfx_tiles.at(i) = tile_id(r.get<uint16_t>());
 			}
+			size_t max_group_index_used = 0;
 			for (size_t i = 0; i != game_st.gfx_tiles.size(); ++i) {
 				tile_id tile_id = game_st.gfx_tiles[i];
-				if (tile_id.group_index() >= game_st.cv5.size()) tile_id = {};
-				size_t megatile_index = game_st.cv5.at(tile_id.group_index()).mega_tile_index[tile_id.subtile_index()];
-				int cv5_flags = game_st.cv5.at(tile_id.group_index()).flags & ~(tile_t::flag_walkable | tile_t::flag_unwalkable | tile_t::flag_very_high | tile_t::flag_middle | tile_t::flag_high | tile_t::flag_partially_walkable);
+				size_t group_index = tile_id.group_index();
+				if (group_index > max_group_index_used) max_group_index_used = group_index;
+				if (group_index >= game_st.cv5.size()) {
+					error("MTXM: tile group index %u out of range [0, %u) at map tile %u", (unsigned int)group_index, (unsigned int)game_st.cv5.size(), (unsigned int)i);
+				}
+				size_t subtile_index = tile_id.subtile_index();
+				size_t megatile_index = game_st.cv5[group_index].mega_tile_index[subtile_index];
+				if (megatile_index >= game_st.mega_tile_flags.size()) {
+					error("MTXM: megatile index %u out of range [0, %u) at map tile %u (group %u subtile %u)", (unsigned int)megatile_index, (unsigned int)game_st.mega_tile_flags.size(), (unsigned int)i, (unsigned int)group_index, (unsigned int)subtile_index);
+				}
+				int cv5_flags = game_st.cv5[group_index].flags & ~(tile_t::flag_walkable | tile_t::flag_unwalkable | tile_t::flag_very_high | tile_t::flag_middle | tile_t::flag_high | tile_t::flag_partially_walkable);
 				st.tiles_mega_tile_index[i] = (uint16_t)megatile_index;
 				st.tiles[i].flags = game_st.mega_tile_flags.at(megatile_index) | cv5_flags;
 				if (tile_id.has_creep()) {
@@ -21353,6 +21430,10 @@ struct game_load_functions : state_functions {
 					st.tiles[i].flags |= tile_t::flag_has_creep;
 				}
 			}
+			std::fprintf(stderr, "openbw: MTXM analyzed pack=%s max_group_index=%zu cv5_entries=%zu\n",
+				game_st.use_scr_semantic_pack ? "scr" : "classic",
+				max_group_index_used,
+				game_st.cv5.size());
 
 			tiles_flags_and(0, game_st.map_tile_height - 2, 5, 1, ~(tile_t::flag_walkable | tile_t::flag_has_creep | tile_t::flag_partially_walkable));
 			tiles_flags_or(0, game_st.map_tile_height - 2, 5, 1, tile_t::flag_unbuildable);
@@ -21767,6 +21848,28 @@ struct game_load_functions : state_functions {
 			{"VCOD", true}
 		});
 
+		scan_tile_heuristics();
+
+		auto version_semantics = map_version_semantics((uint16_t)version);
+		if (!version_semantics.supported) error("unsupported map version %d", version);
+		bool requires_scr_pack = version_semantics.requires_scr_semantic_pack || heuristic_uses_new_tiles;
+		if (requires_scr_pack && !global_st.has_scr_semantic_pack) {
+			error("SCR semantic pack is required for map version %d (new_tiles=%d): no SCR semantic pack is loaded (set OPENBW_SCR_TILESET_DIR or provide ./tileset_data)", version, heuristic_uses_new_tiles ? 1 : 0);
+		}
+		auto& selected_cv5 = requires_scr_pack ? global_st.scr_tileset_cv5 : global_st.tileset_cv5;
+		auto& selected_vf4 = requires_scr_pack ? global_st.scr_tileset_vf4 : global_st.tileset_vf4;
+		a_string version_compatibility_error = check_map_version_compatibility((uint16_t)version, selected_cv5, selected_vf4);
+		if (!version_compatibility_error.empty()) error("%s", version_compatibility_error);
+		game_st.use_scr_semantic_pack = requires_scr_pack;
+		std::fprintf(stderr, "openbw: map version=%d tileset=%zu selected_pack=%s version_requires_scr=%d heuristic_new_tiles=%d heuristic_max_group=%u heuristic_classic_max=%u\n",
+			version,
+			game_st.tileset_index,
+			game_st.use_scr_semantic_pack ? "scr" : "classic",
+			version_semantics.requires_scr_semantic_pack ? 1 : 0,
+			heuristic_uses_new_tiles ? 1 : 0,
+			(unsigned int)heuristic_max_group_index,
+			(unsigned int)heuristic_classic_max_group_index);
+
 		reset();
 
 		for (size_t i = 0; i != 12; ++i) {
@@ -21796,7 +21899,7 @@ struct game_load_functions : state_functions {
 
 		use_map_settings = setup_info.victory_condition == 0 && setup_info.tournament_mode == 0 && setup_info.starting_units == 0;
 
-		if (version == 59 || version == 63) {
+		if (version_semantics.classic_chunk_layout) {
 			if (use_map_settings) {
 				read_chunks({
 					{"STR ", true},
@@ -21827,7 +21930,7 @@ struct game_load_functions : state_functions {
 					{"UNIT", true}
 				});
 			}
-		} else if (version == 205) {
+		} else if (version_semantics.supported) {
 			if (use_map_settings) {
 				read_chunks({
 					{"STR ", true},
@@ -22322,6 +22425,82 @@ void global_init(global_state& st, load_data_file_F&& load_data_file) {
 	for (size_t i = 0; i != 8; ++i) {
 		load_data_file(st.tileset_vf4[i], format("Tileset/%s.vf4", tileset_names.at(i)));
 		load_data_file(st.tileset_cv5[i], format("Tileset/%s.cv5", tileset_names.at(i)));
+	}
+
+	auto try_read_file = [&](a_vector<uint8_t>& dst, const a_string& filename) {
+		try {
+			data_loading::file_reader<> fr(filename);
+			dst.resize(fr.size());
+			if (!dst.empty()) fr.get_bytes(dst.data(), dst.size());
+			return true;
+		} catch (const exception&) {
+			dst.clear();
+			return false;
+		}
+	};
+
+	auto try_load_scr_pack_from_dir = [&](const a_string& base_dir, std::array<a_vector<uint8_t>, 8>& out_vf4, std::array<a_vector<uint8_t>, 8>& out_cv5) {
+		const std::array<std::array<const char*, 3>, 8> name_variants = {{
+			{{"badlands", "Badlands", nullptr}},
+			{{"platform", "Platform", nullptr}},
+			{{"install", "Install", nullptr}},
+			{{"ashworld", "AshWorld", nullptr}},
+			{{"jungle", "Jungle", nullptr}},
+			{{"desert", "Desert", nullptr}},
+			{{"ice", "Ice", nullptr}},
+			{{"twilight", "Twilight", nullptr}},
+		}};
+
+		auto build_path = [&](const char* name, const char* ext) {
+			if (base_dir.empty()) return format("%s%s", name, ext);
+			return format("%s/%s%s", base_dir, name, ext);
+		};
+
+		for (size_t i = 0; i != 8; ++i) {
+			bool got_cv5 = false;
+			bool got_vf4 = false;
+			for (const char* n : name_variants[i]) {
+				if (!n) break;
+				if (!got_cv5) got_cv5 = try_read_file(out_cv5[i], build_path(n, ".cv5"));
+				if (!got_vf4) got_vf4 = try_read_file(out_vf4[i], build_path(n, ".vf4"));
+				if (got_cv5 && got_vf4) break;
+			}
+			if (!got_cv5 || !got_vf4) {
+				out_cv5 = {};
+				out_vf4 = {};
+				return false;
+			}
+		}
+
+		a_string validation_error = validate_scr_semantic_pack(out_cv5, out_vf4);
+		if (!validation_error.empty()) {
+			out_cv5 = {};
+			out_vf4 = {};
+			return false;
+		}
+		return true;
+	};
+
+	st.has_scr_semantic_pack = false;
+	std::array<a_string, 3> scr_dirs = {{
+		std::getenv("OPENBW_SCR_TILESET_DIR") ? std::getenv("OPENBW_SCR_TILESET_DIR") : "",
+		"tileset_data",
+		"./tileset_data",
+	}};
+	for (auto& dir : scr_dirs) {
+		if (dir.empty()) continue;
+		std::array<a_vector<uint8_t>, 8> vf4;
+		std::array<a_vector<uint8_t>, 8> cv5;
+		if (try_load_scr_pack_from_dir(dir, vf4, cv5)) {
+			st.scr_tileset_vf4 = std::move(vf4);
+			st.scr_tileset_cv5 = std::move(cv5);
+			st.has_scr_semantic_pack = true;
+			std::fprintf(stderr, "openbw: loaded SCR semantic pack from '%s'\n", dir.c_str());
+			break;
+		}
+	}
+	if (!st.has_scr_semantic_pack) {
+		std::fprintf(stderr, "openbw: SCR semantic pack not found (searched OPENBW_SCR_TILESET_DIR, ./tileset_data)\n");
 	}
 
 }
