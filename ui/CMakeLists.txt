@@ -19,6 +19,9 @@ add_definitions(-DOPENBW_ENABLE_UI)
 
 add_library(openbw_ui ./sdl2.cpp)
 
+add_executable(gfxtest ./gfxtest.cpp)
+
 target_link_libraries(openbw_ui ${SDL2_LIBRARIES})
+target_link_libraries(gfxtest openbw_ui)
 
 set_property(TARGET openbw_ui PROPERTY POSITION_INDEPENDENT_CODE ON)

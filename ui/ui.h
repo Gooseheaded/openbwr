@@ -6,6 +6,8 @@
 #include "native_window_drawing.h"
 #include "native_sound.h"
 
+#include <cstdio>
+
 namespace bwgame {
 
 struct vr4_entry {
@@ -274,14 +276,14 @@ void load_tileset_image_data(tileset_image_data& img, size_t tileset_index, load
 
 template<bool bounds_check>
 void draw_tile(tileset_image_data& img, size_t megatile_index, uint8_t* dst, size_t pitch, size_t offset_x, size_t offset_y, size_t width, size_t height) {
-	auto* images = &img.vx4.at(megatile_index).images[0];
+	auto* images = &img.vx4[megatile_index].images[0];
 	size_t x = 0;
 	size_t y = 0;
 	for (size_t image_iy = 0; image_iy != 4; ++image_iy) {
 		for (size_t image_ix = 0; image_ix != 4; ++image_ix) {
 			auto image_index = *images;
 			bool inverted = (image_index & 1) == 1;
-			auto* bitmap = inverted ? &img.vr4.at(image_index / 2).inverted_bitmap[0] : &img.vr4.at(image_index / 2).bitmap[0];
+			auto* bitmap = inverted ? &img.vr4[image_index / 2].inverted_bitmap[0] : &img.vr4[image_index / 2].bitmap[0];
 
 			for (size_t iy = 0; iy != 8; ++iy) {
 				for (size_t iv = 0; iv != 8 / sizeof(vr4_entry::bitmap_t); ++iv) {
@@ -310,6 +312,15 @@ void draw_tile(tileset_image_data& img, size_t megatile_index, uint8_t* dst, siz
 		dst += pitch * 8;
 		dst -= 32;
 	}
+}
+
+static inline bool is_valid_megatile_index(const tileset_image_data& img, size_t megatile_index) {
+	if (megatile_index >= img.vx4.size()) return false;
+	const auto& images = img.vx4[megatile_index].images;
+	for (size_t i = 0; i != images.size(); ++i) {
+		if (images[i] / 2 >= img.vr4.size()) return false;
+	}
+	return true;
 }
 
 static inline void draw_tile(tileset_image_data& img, size_t megatile_index, uint8_t* dst, size_t pitch, size_t offset_x, size_t offset_y, size_t width, size_t height) {
@@ -711,6 +722,10 @@ struct ui_functions: ui_util_functions {
 	}
 
 	a_vector<uint8_t> creep_random_tile_indices = a_vector<uint8_t>(256 * 256);
+	size_t invalid_megatile_warnings = 0;
+	size_t invalid_creep_warnings = 0;
+	static const size_t max_ui_warning_logs = 20;
+
 	void init() {
 		uint32_t rand_state = (uint32_t)clock.now().time_since_epoch().count();
 		auto rand = [&]() {
@@ -806,8 +821,41 @@ struct ui_functions: ui_util_functions {
 
 				size_t index = *megatile_index;
 				if (tile->flags & tile_t::flag_has_creep) {
-					index = game_st.cv5.at(1).mega_tile_index[creep_random_tile_indices[tile_x + tile_y * game_st.map_tile_width]];
+					size_t creep_random_index = creep_random_tile_indices[tile_x + tile_y * game_st.map_tile_width];
+					if (game_st.cv5.size() <= 1 || creep_random_index >= 16) {
+						if (invalid_creep_warnings < max_ui_warning_logs) {
+							std::fprintf(stderr, "openbw-ui: invalid creep tile source (cv5_entries=%u random_index=%u) at tile=(%u,%u) frame=%u\n",
+								(unsigned int)game_st.cv5.size(),
+								(unsigned int)creep_random_index,
+								(unsigned int)tile_x,
+								(unsigned int)tile_y,
+								(unsigned int)st.current_frame);
+						}
+						++invalid_creep_warnings;
+					} else {
+						index = game_st.cv5[1].mega_tile_index[creep_random_index];
+					}
 				}
+
+				if (!is_valid_megatile_index(tileset_img, index)) {
+					if (invalid_megatile_warnings < max_ui_warning_logs) {
+						std::fprintf(stderr, "openbw-ui: invalid megatile index=%u at tile=(%u,%u) frame=%u (vx4_entries=%u vr4_entries=%u); using fallback\n",
+							(unsigned int)index,
+							(unsigned int)tile_x,
+							(unsigned int)tile_y,
+							(unsigned int)st.current_frame,
+							(unsigned int)tileset_img.vx4.size(),
+							(unsigned int)tileset_img.vr4.size());
+					}
+					++invalid_megatile_warnings;
+					if (!is_valid_megatile_index(tileset_img, 0)) {
+						++megatile_index;
+						++tile;
+						continue;
+					}
+					index = 0;
+				}
+
 				draw_tile(tileset_img, index, dst, data_pitch, offset_x, offset_y, width, height);
 
 				if (~tile->flags & tile_t::flag_has_creep) {

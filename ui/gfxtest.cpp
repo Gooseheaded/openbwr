@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <thread>
+#include <cstring>
 
 using namespace bwgame;
 
@@ -209,6 +210,8 @@ void free_memory() {
 //	return true;
 //}
 
+#ifdef EMSCRIPTEN
+
 struct dlmalloc_chunk {
 	size_t prev_foot;
 	size_t head;
@@ -229,7 +232,7 @@ size_t max_bytes_allocated = 160 * 1024 * 1024;
 extern "C" void* malloc(size_t n) {
 	void* r = dlmalloc(n);
 	while (!r) {
-		printf("failed to allocate %d bytes\n", n);
+		printf("failed to allocate %zu bytes\n", n);
 		free_memory();
 		r = dlmalloc(n);
 	}
@@ -243,6 +246,8 @@ extern "C" void free(void* ptr) {
 	bytes_allocated -= alloc_size(ptr);
 	dlfree(ptr);
 }
+
+#endif
 
 #ifdef EMSCRIPTEN
 
@@ -608,11 +613,48 @@ extern "C" void load_replay(const uint8_t* data, size_t len) {
 
 #endif
 
-int main() {
+int main(int argc, char** argv) {
 
 	using namespace bwgame;
 
 	log("v25\n");
+
+	a_string replay_filename = "maps/p49.rep";
+	a_string data_dir_override;
+	a_string bwapi_dir_override;
+
+	auto print_usage = [&]() {
+		log("usage: gfxtest [--replay <path>] [--data-dir <path>] [--bwapi-dir <path>]\n");
+	};
+
+	for (int i = 1; i < argc; ++i) {
+		const char* arg = argv[i];
+		if (std::strcmp(arg, "--replay") == 0) {
+			if (i + 1 >= argc) {
+				print_usage();
+				error("missing value for --replay");
+			}
+			replay_filename = argv[++i];
+		} else if (std::strcmp(arg, "--data-dir") == 0) {
+			if (i + 1 >= argc) {
+				print_usage();
+				error("missing value for --data-dir");
+			}
+			data_dir_override = argv[++i];
+		} else if (std::strcmp(arg, "--bwapi-dir") == 0) {
+			if (i + 1 >= argc) {
+				print_usage();
+				error("missing value for --bwapi-dir");
+			}
+			bwapi_dir_override = argv[++i];
+		} else if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0) {
+			print_usage();
+			return 0;
+		} else {
+			print_usage();
+			error("unknown argument '%s'", arg);
+		}
+	}
 
 	size_t screen_width = 1280;
 	size_t screen_height = 800;
@@ -627,7 +669,37 @@ int main() {
 	}
 	auto load_data_file = data_loading::data_files_directory<data_loading::data_files_loader<data_loading::mpq_file<data_loading::js_file_reader<>>>>("");
 #else
-	auto load_data_file = data_loading::data_files_directory("");
+	auto make_native_loader = [&]() {
+		a_vector<a_string> candidate_dirs;
+		if (!data_dir_override.empty()) candidate_dirs.push_back(data_dir_override);
+		if (!bwapi_dir_override.empty()) {
+			candidate_dirs.push_back(bwapi_dir_override + "/mpq");
+			candidate_dirs.push_back(bwapi_dir_override);
+		}
+		candidate_dirs.push_back("");
+		candidate_dirs.push_back("mpq");
+		candidate_dirs.push_back("../bwapi/mpq");
+		candidate_dirs.push_back("../bwapi");
+		candidate_dirs.push_back("../../bwapi/mpq");
+		candidate_dirs.push_back("../../bwapi");
+
+		a_vector<a_string> load_errors;
+		for (auto& dir : candidate_dirs) {
+			try {
+				auto loader = data_loading::data_files_directory(dir);
+				log("using data files dir: %s\n", dir.empty() ? "." : dir.c_str());
+				return loader;
+			} catch (const exception& e) {
+				load_errors.push_back(format("%s -> %s", dir.empty() ? "." : dir.c_str(), e.what()));
+			}
+		}
+
+		a_string msg = "failed to locate MPQ data files. tried:\n";
+		for (auto& v : load_errors) msg += "  - " + v + "\n";
+			error("%s", msg.c_str());
+		return data_loading::data_files_directory("");
+	};
+	auto load_data_file = make_native_loader();
 #endif
 
 	game_player player(load_data_file);
@@ -644,7 +716,8 @@ int main() {
 	ui.init();
 
 #ifndef EMSCRIPTEN
-	ui.load_replay_file("maps/p49.rep");
+	log("loading replay: %s\n", replay_filename);
+	ui.load_replay_file(replay_filename);
 #endif
 
 	auto& wnd = ui.wnd;
