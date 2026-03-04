@@ -1,234 +1,158 @@
 # AGENTS.md
 
 ## Purpose
+Guidance for coding agents in `openbw`.
+Prefer small, reviewable, deterministic changes.
+Simulation correctness is higher priority than visual fidelity.
 
-This file guides coding agents working in the `openbw` repository.
-Prefer small, deterministic, reviewable changes.
-Preserve gameplay determinism above all else.
-
-## Instruction Sources Checked
-
-I checked for additional agent instructions in these locations:
-
+## Additional Rule Files Checked
+Checked for extra instructions in:
 - `.cursor/rules/`
 - `.cursorrules`
 - `.github/copilot-instructions.md`
+Result at time of writing: none found.
+If they appear later, treat them as authoritative.
 
-Result: none were found in this repository at the time of writing.
-If any of these files are later added, treat them as authoritative and merge their guidance into this document.
+## Required Workflow (bd + git)
+Use `bd` and `git` constantly, often in tandem.
+Issue tracking and code changes should move together.
 
-## Core Workflow Requirement (Important)
-
-Use `bd` and `git` constantly, and often in tandem.
-Treat issue state and code state as coupled, not separate.
-
-Minimum rhythm for every task:
-
+Minimum loop per task:
 1. `bd ready` (or `bd list`) to select work
-2. `git status -sb` to confirm working tree
-3. implement smallest useful change
-4. `git diff` to review exactly what changed
-5. `bd update <id> ...` to record status/context
+2. `git status -sb` to inspect workspace state
+3. implement the smallest useful change
+4. `git diff` to verify exact scope
+5. `bd update <id> --notes "..."`
 6. run relevant build/test command(s)
-7. `bd sync` and `git status -sb` before handoff/commit
+7. `bd sync` and final `git status -sb`
 
-If `bd` is not initialized in this repo yet:
-
-- `bd init`
-- then continue workflow above
-
-Useful `bd` commands:
-
-- `bd ready`
-- `bd show <id>`
-- `bd update <id> --notes "..."`
-- `bd close <id>`
-- `bd sync`
-- `bd prime` (workflow context)
+If beads is not initialized, run `bd init`.
+Useful commands: `bd ready`, `bd show <id>`, `bd update <id> ...`, `bd close <id>`, `bd sync`, `bd prime`.
 
 ## Repository Snapshot
-
-Primary code is header-heavy C++ with two CMake entry points:
-
-- `mini-openbwapi/CMakeLists.txt`
-- `ui/CMakeLists.txt`
-
-Top-level helper scripts:
-
-- `build.ps1` (builds through sibling `bwapi` repo scripts)
-- `run.ps1` (runs via sibling `bwapi` launcher)
-
-No top-level `CMakeLists.txt` exists in this repo root.
+- C++14 codebase, header-heavy.
+- Main CMake entry points:
+  - `mini-openbwapi/CMakeLists.txt`
+  - `ui/CMakeLists.txt`
+- Helper scripts:
+  - `build.ps1`
+  - `run.ps1`
+- No top-level `CMakeLists.txt` in repo root.
 
 ## Build Commands
 
-### A) Preferred integration build (via sibling BWAPI repo)
-
-From repo root (`openbw`):
-
+### Preferred integration path (via sibling BWAPI repo)
 ```powershell
 pwsh ./build.ps1 -BwapiDir ..\bwapi -Configuration Release -EnableUi 0 -Jobs 8
 pwsh ./build.ps1 -BwapiDir ..\bwapi -Configuration Release -EnableUi 1 -Jobs 8
-```
-
-Notes:
-
-- `build.ps1` expects `..\bwapi\configure.ps1` and `..\bwapi\build.ps1`.
-- It builds BWAPI targets (`BWAPILauncher`, `ExampleAIModule`) that include OpenBW components.
-
-Run launcher path:
-
-```powershell
 pwsh ./run.ps1 -BwapiDir ..\bwapi
 ```
 
-### B) Direct local build for `mini-openbwapi` library
-
+### Local mini-openbwapi build
 ```powershell
 cmake -S mini-openbwapi -B build-mini -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build-mini -j 8
-cmake --build build-mini --target mini-openbwapi
 ```
 
-Enable UI in this mode:
-
+Enable UI code in this path:
 ```powershell
 cmake -S mini-openbwapi -B build-mini-ui -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENBW_ENABLE_UI=ON
 cmake --build build-mini-ui -j 8
 ```
 
-### C) Build UI library directly
-
+### UI build (includes `gfxtest`)
 ```powershell
 cmake -S ui -B build-ui -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build-ui -j 8
 ```
 
-## Lint / Format Commands
+Replay smoke run:
+```powershell
+.\build-ui\gfxtest.exe --replay "<replay-path>" --bwapi-dir "..\bwapi"
+```
 
-This repo currently has no dedicated lint target and no checked-in formatter config (`.clang-format` not found).
+## Lint / Formatting
+No dedicated lint target and no repo `.clang-format`.
+Use targeted compile checks and keep style consistent with surrounding code.
+Avoid repository-wide formatting churn.
 
-Use these practical checks:
-
-1. clean rebuild of touched target(s)
-2. compile with warnings enabled when needed
-3. keep edits style-consistent with neighboring code (no bulk reformat)
-
-Optional warning-heavy configure example:
-
+Optional warning-heavy build:
 ```powershell
 cmake -S mini-openbwapi -B build-mini-warn -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wpedantic"
 cmake --build build-mini-warn -j 8
 ```
 
-Do not introduce repository-wide formatting churn.
-
-## Test Commands (and Single-Test Guidance)
-
-Current state in this repository:
-
-- No first-party CMake test suite was found (`add_test(...)` not present).
-- `ctest` exists in toolchain, but this repo does not define test targets itself.
-
-Practical validation commands:
-
+## Test Commands (Single-Test Focus)
+Default contract suite:
 ```powershell
-cmake --build build-mini --target mini-openbwapi
-pwsh ./run.ps1 -BwapiDir ..\bwapi
+cmake -S mini-openbwapi -B build-tests -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-tests -j 8
+ctest --test-dir build-tests --output-on-failure
 ```
 
-If using BWAPI-side test harnesses (when available in sibling repo):
-
-- run all tests:
+Run one test:
 ```powershell
-ctest --test-dir <bwapi-build-dir> --output-on-failure
-```
-- run a single test by name regex:
-```powershell
-ctest --test-dir <bwapi-build-dir> -R "<single-test-regex>" --output-on-failure
+ctest --test-dir build-tests -R "^contract\.version\.classic$" --output-on-failure
 ```
 
-For this repo alone, "single test" usually means a targeted smoke scenario (specific replay/map path) rather than a unit test target.
+Run one group:
+```powershell
+ctest --test-dir build-tests -R "^contract\." --output-on-failure
+```
+
+Fixture-data tests are local-only and disabled by default.
+Enable explicitly:
+```powershell
+cmake -S mini-openbwapi -B build-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENBW_ENABLE_LOCAL_FIXTURES=ON
+ctest --test-dir build-tests --output-on-failure
+```
 
 ## Code Style Guidelines
 
-### Language / Standard
-
-- C++14 is the configured standard (`CMAKE_CXX_STANDARD 14`).
-- Keep new code C++14-compatible unless build config is intentionally upgraded.
+### Language and Compatibility
+- Keep code C++14-compatible.
+- Favor deterministic logic in simulation-critical paths.
 
 ### Formatting
+- Match local file style (tabs are common).
+- Keep brace style consistent with nearby code.
+- Avoid unrelated whitespace-only edits.
 
-- Use tabs for indentation (match existing files).
-- Brace style: opening brace on same line for functions/blocks.
-- Keep style local: copy the surrounding file's formatting patterns.
-- Avoid unrelated whitespace-only diffs.
-
-### Includes / Imports
-
-- In headers: include project headers first, then standard headers.
-- In cpp files: include corresponding header first, then local/project, then std.
+### Includes
+- Headers: project headers first, then standard headers.
+- CPP files: matching header first, then local/project, then std.
 - Prefer explicit includes over transitive assumptions.
 
-### Naming
+### Naming and Types
+- `snake_case` for functions, locals, and members.
+- `_t` suffix is common for internal types (`unit_type_t`, `vf4_entry`).
+- Use fixed-width integers for binary parsing paths.
+- Use `size_t` for counts and indices.
+- Use project aliases where already adopted (`a_vector`, `a_string`, `a_map`, etc.).
 
-- `snake_case` for functions, local variables, and most members.
-- many internal types use `_t` suffix (for example `unit_type_t`, `vf4_entry`).
-- constants commonly use `static const` and `std::array`.
-- bit flags often use `flag_*` naming.
-- preserve existing public API names in `OpenBWAPI` namespace.
+### Parsing and Error Handling
+- Validate external data before use.
+- Bounds-check all map/replay-derived indices.
+- Use fail-fast `bwgame::error(...)` with contextual messages.
+- Do not silently coerce unknown semantic data.
 
-### Types
+### Logging
+- Keep diagnostics actionable and concise.
+- Log both acceptance and rejection reasons for compatibility branches.
+- Avoid noisy per-frame logging unless explicitly gated.
 
-- Use fixed-width integer types for binary/data-format code (`uint8_t`, `uint16_t`, etc.).
-- Use `size_t` for counts/indices.
-- Prefer project container aliases where already used:
-  - `a_vector`, `a_string`, `a_map`, `a_unordered_map`, etc.
-- Preserve deterministic numeric behavior; avoid accidental signed/unsigned mixing.
+## Scope and Hygiene
+- Keep patches focused and minimal.
+- Avoid editing vendored code under `deps/` unless requested.
+- Do not commit generated outputs (`build-*`, scan artifacts).
+- Do not commit copyrighted/local game assets (MPQs, replay corpora, extracted tilesets).
 
-### Data Parsing / Bounds
-
-- Validate all externally loaded data before use.
-- When indexing data derived from files/replays/maps, bounds-check first.
-- Follow existing defensive parse patterns in map/replay loaders.
-
-### Error Handling
-
-- Project convention is fail-fast using `bwgame::error(...)`.
-- `error(...)` throws `bwgame::exception` (see `util.h`).
-- Include concrete context in error messages:
-  - filename/chunk/tag/index/value
-- Prefer explicit hard errors over silent fallback for semantic correctness paths.
-
-### Logging / Diagnostics
-
-- Keep logs actionable and specific.
-- For compatibility work, log both:
-  - what was accepted
-  - why something was rejected
-- Avoid noisy per-frame logging in hot loops unless gated.
-
-## Determinism and Simulation Safety Rules
-
-- Deterministic simulation is higher priority than rendering fidelity.
-- Do not add nondeterministic behavior (time-based, unordered iteration dependence, random seeding drift).
-- Keep replay/map parsing behavior explicit and version-gated.
-- Never silently coerce unknown tile/semantic data in core simulation paths.
-
-## Scope and Change Hygiene
-
-- Make minimal, focused patches.
-- Do not modify vendored third-party code in `deps/` unless explicitly requested.
-- Avoid committing generated build outputs (`build-mini/`, temporary artifacts) unless explicitly requested.
-- Keep untracked local asset folders out of commits unless required (for example `tileset_data/`).
-
-## Git + bd Tandem Checklist Before Handoff
-
-1. `bd show <id>` reflects current status/notes
-2. `git status -sb` is understood
-3. `git diff` reviewed for scope correctness
-4. relevant build/validation command(s) run
+## Handoff Checklist
+1. `bd show <id>` reflects latest status
+2. `git status -sb` understood
+3. `git diff` reviewed for scope
+4. relevant build/tests executed
 5. `bd sync`
 6. final `git status -sb`
 
-This tandem loop is mandatory: use `bd` and `git` constantly, and often together.
+Use `bd` and `git` together throughout the task lifecycle.
